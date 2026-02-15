@@ -1,0 +1,142 @@
+
+Docker creation
+****************
+docker build -t brainstack:latest .
+
+View Docker Images
+*******************
+docker images
+
+Run the docker images
+*********************
+docker run -p 3000:3000 brainstack:latest
+
+Now check the brower with the ec2 public ip ,Port :3000        http://13.232.74.162:3000/\
+
+Configure aws  in order to creat ECR Repo
+**************************************
+
+aws ecr create-repository \
+  --repository-name react-app \
+  --region ap-south-1
+
+Authenticate ECR with AWS account
+*********************************
+aws ecr get-login-password --region ap-south-1 | \
+docker login --username AWS --password-stdin 166647428737.dkr.ecr.ap-south-1.amazonaws.com
+
+
+Tag docker image
+*****************
+docker tag brainstack:latest 166647428737.dkr.ecr.ap-south-1.amazonaws.com/react-app:latest
+
+Push the docker
+***************
+docker push 166647428737.dkr.ecr.ap-south-1.amazonaws.com/react-app
+
+EKS cluster Creation 
+*********************
+eksctl create cluster \
+  --name react-eks-cluster \
+  --region ap-south-1 \
+  --nodegroup-name reactapp-nodes \
+  --node-type t3.micro \
+  --nodes 7
+
+
+Create deployment.yaml
+********************
+
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: brain-tasks-deployment
+spec:
+  replicas: 5
+  selector:
+    matchLabels:
+      app: react-app
+  template:
+    metadata:
+      labels:
+        app: react-app
+    spec:
+      containers:
+      - name: react-app
+        image: 166647428737.dkr.ecr.ap-south-1.amazonaws.com/react-ap
+        ports:
+        - containerPort: 3000
+
+Create service.yaml
+*********************
+apiVersion: v1
+kind: Service
+metadata:
+  name: react-app-service
+spec:
+  type: LoadBalancer
+  selector:
+    app: react-app
+  ports:
+    - protocol: TCP
+      port: 80
+      targetPort: 3000
+
+Applying Deployment & service.yaml 
+
+kubectl apply -f deployment.yaml
+kubectl apply -f service.yaml
+
+
+
+
+
+
+buildspec.yaml
+************
+
+version: 0.2
+
+env:
+ variables:
+    AWS_REGION: ap-south-1
+    CLUSTER_NAME: react-eks-cluster
+    ECR_REPO: react-app
+    ACCOUNT_ID: 166647428737
+
+phases:
+
+ install:
+    commands:
+      - echo Installing kubectl...
+      - curl -LO "https://dl.k8s.io/release/v1.28.2/bin/linux/amd64/kubectl"
+      - chmod +x kubectl
+      - mv kubectl /usr/local/bin/kubectl
+      - kubectl version --client 
+      - echo "Installing eksctl..."
+      - curl --silent --location "https://github.com/weaveworks/eksctl/releases/latest/download/eksctl_$(uname -s)_amd64.tar.gz" | tar xz -C /tmp
+      - sudo mv /tmp/eksctl /usr/local/bin
+      - eksctl version
+
+ pre_build:
+    commands:
+    
+      - echo Logging in to ECR...
+      - ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
+      - aws ecr get-login-password --region $AWS_REGION | docker login --username AWS --password-stdin $ACCOUNT_ID.dkr.ecr.$AWS_REGION.amazonaws.com
+      - echo Updating kubeconfig for EKS...
+      - aws eks update-kubeconfig --region $AWS_REGION --name $CLUSTER_NAME
+
+ build:
+    commands:
+      - echo Building Docker image...
+      - docker build -t $ECR_REPO:latest .
+      - docker tag $ECR_REPO:latest $ACCOUNT_ID.dkr.ecr.$AWS_REGION.amazonaws.com/$ECR_REPO:latest
+      - docker push $ACCOUNT_ID.dkr.ecr.$AWS_REGION.amazonaws.com/$ECR_REPO:latest
+
+ post_build:
+    commands:
+      - echo Deploying to EKS...
+      - aws eks update-kubeconfig --region $AWS_REGION --name $CLUSTER_NAME
+      - kubectl apply -f deployment.yaml
+      - kubectl apply -f service.yaml
